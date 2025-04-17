@@ -1,179 +1,248 @@
+// repoScannerWithFixes.js
+const crypto = require('crypto');
+const mongoose = require('mongoose');
+const geminiAI = require('./geminiAI'); // Import your fix suggestion module
+
+// Define MongoDB schemas for scan and vulnerability data
+const scanSchema = new mongoose.Schema({
+  scanId: { type: String, required: true, unique: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  repositoryUrl: { type: String, required: true },
+  branch: { type: String, default: 'main' },
+  status: { type: String, enum: ['initiated', 'processing', 'completed', 'failed'], default: 'initiated' },
+  progress: { type: Number, default: 0 },
+  timestamp: { type: Date, default: Date.now },
+  commit: String,
+  summary: {
+    totalVulnerabilities: Number,
+    criticalCount: Number,
+    highCount: Number,
+    mediumCount: Number,
+    lowCount: Number,
+  },
+  duration: String,
+  filesScanned: Number,
+});
+
+const vulnerabilitySchema = new mongoose.Schema({
+  vulnerabilityId: { type: String, required: true, unique: true },
+  scanId: { type: String, required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, required: true },
+  severity: { type: String, enum: ['low', 'medium', 'high', 'critical'], required: true },
+  location: { file: String, line: Number, column: Number },
+  description: String,
+  code: String,
+  suggestedFix: String,
+  status: { type: String, enum: ['open', 'fixed', 'ignored'], default: 'open' },
+  createdAt: { type: Date, default: Date.now },
+  repo: String,
+});
+
+const Scan = mongoose.models.Scan || mongoose.model('Scan', scanSchema);
+const Vulnerability = mongoose.models.Vulnerability || mongoose.model('Vulnerability', vulnerabilitySchema);
 
 /**
- * Mock implementation of Gemini AI for generating vulnerability fixes
- * In a real implementation, this would call the Gemini AI API
+ * Repository Scanner utility 
+ * Connect to MongoDB via mongoose.connect(...) before using
  */
-const geminiAI = {
+const repoScanner = {
   /**
-   * Generate a fix suggestion for a security vulnerability
-   * @param {string} code - The vulnerable code snippet
-   * @param {string} vulnerabilityType - The type of vulnerability
-   * @returns {string} A suggested fix with explanation
+   * Initiate a scan of a Git repository
    */
-  generateFixSuggestion: async (code, vulnerabilityType) => {
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Return predefined fixes based on the vulnerability type
-    switch (vulnerabilityType) {
-      case 'SQL Injection':
-        return `Use parameterized queries instead of string concatenation:
+  initiateRepositoryScan: async (repositoryUrl, userId, branch = 'main') => {
+    if (!repositoryUrl) throw new Error('Repository URL is required');
+    if (!userId) throw new Error('User ID is required');
 
-\`\`\`javascript
-// VULNERABLE:
-const query = \`SELECT * FROM users WHERE id = \${userId}\`;
+    const scanId = crypto.randomBytes(16).toString('hex');
+    const newScan = new Scan({ scanId, userId, repositoryUrl, branch });
+    await newScan.save();
 
-// FIXED:
-const query = 'SELECT * FROM users WHERE id = ?';
-db.query(query, [userId]);
-\`\`\`
+    // Kick off background progress and finalization
+    setTimeout(() => updateScanProgress(scanId, userId), 2000);
 
-This prevents attackers from manipulating the SQL query structure by ensuring that user input is treated as data, not executable code.`;
-        
-      case 'Cross-site Scripting (XSS)':
-        return `Avoid directly inserting HTML from user input:
+    return { scanId, repositoryUrl, branch, status: 'initiated', progress: 0, timestamp: new Date().toISOString() };
+  },
 
-\`\`\`javascript
-// VULNERABLE:
-element.innerHTML = userInput;
-// or
-<div dangerouslySetInnerHTML={{ __html: userInput }} />
+  /**
+   * Get scan status
+   */
+  getScanStatus: async (scanId, userId) => {
+    if (!scanId || !userId) throw new Error('Scan ID and User ID are required');
+    const scan = await Scan.findOne({ scanId, userId });
+    if (!scan) throw new Error('Scan not found');
+    return { scanId, status: scan.status, progress: scan.progress };
+  },
 
-// FIXED:
-// In React:
-<div>{userInput}</div>
+  /**
+   * Get scan results (with suggested fixes)
+   */
+  getScanResults: async (scanId, userId) => {
+    if (!scanId || !userId) throw new Error('Scan ID and User ID are required');
+    const scan = await Scan.findOne({ scanId, userId });
+    if (!scan) throw new Error('Scan not found');
 
-// If HTML is necessary, sanitize it:
-import DOMPurify from 'dompurify';
-element.innerHTML = DOMPurify.sanitize(userInput);
-// or
-<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(userInput) }} />
-\`\`\`
+    const vulnerabilities = await Vulnerability.find({ scanId, userId });
+    return {
+      id: scan.scanId,
+      repositoryUrl: scan.repositoryUrl,
+      branch: scan.branch,
+      commit: scan.commit,
+      timestamp: scan.timestamp.toISOString(),
+      status: scan.status,
+      summary: scan.summary,
+      vulnerabilities: vulnerabilities.map(v => ({
+        id: v.vulnerabilityId,
+        type: v.type,
+        severity: v.severity,
+        location: v.location,
+        description: v.description,
+        code: v.code,
+        suggestedFix: v.suggestedFix,
+        status: v.status,
+        createdAt: v.createdAt.toISOString(),
+        repo: v.repo,
+      })),
+    };
+  },
 
-This ensures that any HTML tags in user input are escaped or properly sanitized, preventing attackers from injecting malicious scripts.`;
-        
-      case 'Hardcoded Secret':
-        return `Move secrets to environment variables:
-
-\`\`\`javascript
-// VULNERABLE:
-const API_KEY = "sk_live_abcdef123456";
-
-// FIXED:
-const API_KEY = process.env.API_KEY;
-\`\`\`
-
-Also, ensure you:
-1. Don't commit .env files to your repository (add them to .gitignore)
-2. Use a secrets management service for production environments
-3. Rotate compromised secrets immediately`;
-        
-      case 'Insecure Cookie':
-        return `Set the secure flag to ensure cookies are only sent over HTTPS:
-
-\`\`\`javascript
-// VULNERABLE:
-res.cookie("session", token, { httpOnly: true });
-
-// FIXED:
-res.cookie("session", token, { 
-  httpOnly: true, 
-  secure: true,
-  sameSite: 'strict' 
-});
-\`\`\`
-
-This protects against:
-1. Cookie theft via man-in-the-middle attacks
-2. Cross-site request forgery with the sameSite flag
-3. Client-side JavaScript access with httpOnly`;
-        
-      case 'Path Traversal':
-        return `Sanitize file paths to prevent directory traversal:
-
-\`\`\`javascript
-// VULNERABLE:
-fs.readFile(path + "../../../" + filename);
-
-// FIXED:
-const path = require('path');
-const safePath = path.resolve(basePath, filename);
-
-// Ensure the path is still within the allowed directory
-if (!safePath.startsWith(basePath)) {
-  throw new Error('Invalid file path');
-}
-
-fs.readFile(safePath);
-\`\`\`
-
-This prevents attackers from accessing files outside the intended directory by:
-1. Resolving all relative path components
-2. Validating the final path is within allowed boundaries
-3. Rejecting suspicious file paths`;
-        
-      case 'Outdated Dependency':
-        return `Update the vulnerable dependency to a secure version:
-
-\`\`\`javascript
-// VULNERABLE:
-// package.json
-"dependencies": {
-  "vulnerable-package": "1.0.0"
-}
-
-// FIXED:
-"dependencies": {
-  "vulnerable-package": "1.2.3"
-}
-\`\`\`
-
-Also consider:
-1. Setting up automated dependency scanning
-2. Using package-lock.json or yarn.lock for consistent installs
-3. Subscribing to security advisories for critical dependencies`;
-        
-      case 'Command Injection':
-        return `Avoid using user input directly in command execution:
-
-\`\`\`javascript
-// VULNERABLE:
-exec("rm -rf " + userInput);
-
-// FIXED:
-// Use safer alternatives like specific APIs
-const fs = require('fs').promises;
-await fs.unlink(validatedFilePath);
-
-// If exec is necessary, validate inputs strictly
-const { execFile } = require('child_process');
-const allowedCommands = ['ls', 'cat'];
-if (allowedCommands.includes(command)) {
-  execFile(command, [validatedArg], (error, stdout) => {
-    // Handle result safely
-  });
-}
-\`\`\`
-
-This prevents attackers from injecting malicious commands that could execute with your application's privileges.`;
-        
-      default:
-        return `Based on the code analysis, here's a suggested fix:
-
-1. Validate all user inputs before processing them
-2. Apply input sanitization appropriate to the context
-3. Implement proper error handling to avoid information leakage
-4. Follow the principle of least privilege
-5. Consider using security-focused libraries for critical operations
-
-For this specific code snippet:
-\`\`\`javascript
-${code}
-\`\`\`
-
-Review it carefully for potential security weaknesses related to input handling, authentication, authorization, and data protection.`;
+  /**
+   * Fetch and store fix suggestions for all vulnerabilities in a scan
+   */
+  fetchFixSuggestions: async (scanId, userId) => {
+    const vulns = await Vulnerability.find({ scanId, userId, suggestedFix: { $exists: false } });
+    for (let vuln of vulns) {
+      try {
+        const suggestion = await geminiAI.generateFixSuggestion(vuln.code, vuln.type);
+        await Vulnerability.findByIdAndUpdate(vuln._id, { suggestedFix: suggestion });
+      } catch (err) {
+        console.error(`Failed to generate fix for ${vuln.vulnerabilityId}:`, err);
+      }
     }
+  },
+
+  /**
+   * Get full scan history for a user
+   */
+  getUserScanHistory: async (userId) => {
+    if (!userId) throw new Error('User ID is required');
+    const scans = await Scan.find({ userId }).sort({ timestamp: -1 });
+    return scans.map(scan => ({
+      id: scan.scanId,
+      repositoryUrl: scan.repositoryUrl,
+      branch: scan.branch,
+      timestamp: scan.timestamp.toISOString(),
+      status: scan.status,
+      summary: scan.summary,
+    }));
+  },
+
+  /**
+   * User dashboard data
+   */
+  getUserDashboardData: async (userId) => {
+    if (!userId) throw new Error('User ID is required');
+    const scans = await Scan.find({ userId });
+    const repos = [...new Set(scans.map(s => s.repositoryUrl))];
+    const openVulns = await Vulnerability.countDocuments({ userId, status: 'open' });
+    const fixedIssues = await Vulnerability.countDocuments({ userId, status: 'fixed' });
+    const recentScans = await Scan.find({ userId }).sort({ timestamp: -1 }).limit(3);
+
+    return {
+      activeRepositories: repos.length,
+      openVulnerabilities: openVulns,
+      recentScansCount: await Scan.countDocuments({ userId, timestamp: { $gte: new Date(Date.now() - 7*24*60*60*1000) } }),
+      fixedIssues,
+      recentScans: recentScans.map((scan, i) => ({ id: i+1, repo: scan.repositoryUrl.split('/').pop(), date: getRelativeTimeString(scan.timestamp), issues: scan.summary?.totalVulnerabilities || 0 })),
+      topVulnerabilities: (await Vulnerability.find({ userId, status: 'open', severity: { $in: ['critical','high'] } }).sort({ severity: -1 }).limit(3))
+        .map(v => ({ id: v.vulnerabilityId, type: v.type, severity: v.severity, location: v.repo })),
+    };
   }
 };
 
-module.exports = geminiAI;
+/**
+ * Asynchronous scan progress updater
+ */
+async function updateScanProgress(scanId, userId) {
+  try {
+    let progress = 0;
+    const interval = setInterval(async () => {
+      progress = Math.min(100, progress + (Math.floor(Math.random()*15) + 5));
+      const status = progress < 100 ? 'processing' : 'completed';
+      await Scan.findOneAndUpdate({ scanId, userId }, { status, progress });
+      if (progress === 100) {
+        clearInterval(interval);
+        await finalizeScan(scanId, userId);
+      }
+    }, 3000);
+  } catch (err) {
+    console.error('Error updating progress:', err);
+    await Scan.findOneAndUpdate({ scanId, userId }, { status: 'failed' });
+  }
+}
+
+/**
+ * Finalize scan: generate vulnerabilities and fetch fix suggestions
+ */
+async function finalizeScan(scanId, userId) {
+  try {
+    const scan = await Scan.findOne({ scanId, userId });
+    if (!scan) return;
+
+    const seed = parseInt(scanId.slice(0, 8), 16);
+    const count = (seed % 20) + 1;
+    const repoName = scan.repositoryUrl.split('/').pop() || 'repo';
+
+    // Generate vulnerabilities
+    for (let i = 0; i < count; i++) {
+      const types = ['SQL Injection','Cross-site Scripting (XSS)','Hardcoded Secret','Insecure Cookie','Path Traversal','Outdated Dependency','Command Injection','Unsafe Deserialization','Insecure Direct Object Reference','Sensitive Data Exposure'];
+      const severityList = ['low','medium','high','critical'];
+      const type = types[(seed + i) % types.length];
+      const severity = severityList[(seed + i) % severityList.length];
+      const location = { file: `src/${['services','controllers','utils','middlewares','models'][i%5]}/${['auth','user','data','config','api'][i%5]}.js`, line: (seed + i*11) % 200 + 1 };
+      const vulnerabilityId = `vuln-${scanId.slice(0,4)}-${i}`;
+
+      await new Vulnerability({ vulnerabilityId, scanId, userId, type, severity, location,
+        description: `Potential ${type} vulnerability...`,
+        code: ['const query = `SELECT * FROM users WHERE id = ${userId}`;','res.send(`<div>${userInput}</div>`);','const API_KEY = "sk_live_abcdef123456";','res.cookie("session", token, { httpOnly: true });','fs.readFile(path + "../../../" + filename);','npm install some-package@1.0.0','const obj = JSON.parse(serializedData);','exec("rm -rf " + userInput);','const userData = db.getUserById(req.params.id);','console.log("User data:", userData);'][i%10], status: i%5===0? 'fixed': 'open', createdAt: new Date(Date.now() - i*86400000), repo: repoName
+      }).save();
+    }
+
+    // Update scan summary and metadata
+    const vulns = await Vulnerability.find({ scanId, userId });
+    const summary = {
+      totalVulnerabilities: vulns.length,
+      criticalCount: vulns.filter(v => v.severity==='critical').length,
+      highCount: vulns.filter(v => v.severity==='high').length,
+      mediumCount: vulns.filter(v => v.severity==='medium').length,
+      lowCount: vulns.filter(v => v.severity==='low').length,
+    };
+    const duration = `${(seed%5)+1}m ${(seed%50)+10}s`;
+    const filesScanned = (seed % 50) + 20;
+
+    await Scan.findOneAndUpdate({ scanId, userId }, { status: 'completed', progress: 100, commit: scanId.slice(0,7), summary, duration, filesScanned });
+
+    // Fetch and store fix suggestions
+    await repoScanner.fetchFixSuggestions(scanId, userId);
+  } catch (err) {
+    console.error('Error finalizing scan:', err);
+    await Scan.findOneAndUpdate({ scanId, userId }, { status: 'failed' });
+  }
+}
+
+/**
+ * Helper for relative time strings
+ */
+function getRelativeTimeString(date) {
+  const diffMs = Date.now() - date;
+  const secs = Math.round(diffMs/1000);
+  if (secs<60) return 'just now';
+  const mins = Math.round(secs/60);
+  if (mins<60) return `${mins} minute${mins!==1?'s':''} ago`;
+  const hrs = Math.round(mins/60);
+  if (hrs<24) return `${hrs} hour${hrs!==1?'s':''} ago`;
+  const days = Math.round(hrs/24);
+  return days<7 ? `${days} day${days!==1?'s':''} ago` : date.toISOString().split('T')[0];
+}
+
+module.exports = repoScanner;
