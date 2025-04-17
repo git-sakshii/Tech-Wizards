@@ -1,0 +1,73 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 13%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 199 89% 48%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 173 82% 26%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 223 47% 20%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 160 84% 39%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 222 50% 8%;
+    --sidebar-foreground: 214 100% 97%;
+    --sidebar-primary: 199 89% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 223 47% 14%;
+    --sidebar-accent-foreground: 214 100% 97%;
+    --sidebar-border: 223 47% 14%;
+    --sidebar-ring: 224.3 76.3% 48%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-shield-dark text-foreground;
+  }
+
+  .code-block {
+    @apply bg-shield-code-bg rounded-md p-4 font-mono text-sm overflow-x-auto;
+  }
+  
+  .vulnerability-high {
+    @apply border-l-4 border-shield-high bg-shield-high/10;
+  }
+  
+  .vulnerability-medium {
+    @apply border-l-4 border-shield-medium bg-shield-medium/10;
+  }
+  
+  .vulnerability-low {
+    @apply border-l-4 border-shield-low bg-shield-low/10;
+  }
+}
